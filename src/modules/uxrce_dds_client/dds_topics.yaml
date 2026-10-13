@@ -36,6 +36,9 @@ publications:
     type: px4_msgs::msg::ManualControlSetpoint
     rate_limit: 25.
 
+  - topic: /fmu/out/mavlink_tunnel
+    type: px4_msgs::msg::MavlinkTunnel
+
   - topic: /fmu/out/message_format_response
     type: px4_msgs::msg::MessageFormatResponse
 
