@@ -1,0 +1,18 @@
+#!/bin/sh
+#
+# Telemetry radio stream set on TELEM1 (/dev/ttyS6). With MAV_0_MODE 1
+# (Custom, set in the parameter file) the radio carries only these streams;
+# HEARTBEAT, STATUSTEXT, command replies and mission progress are sent anyway.
+#------------------------------------------------------------------------------
+
+mavlink stream -d /dev/ttyS6 -s GPS_RAW_INT -r 2
+mavlink stream -d /dev/ttyS6 -s GLOBAL_POSITION_INT -r 2
+mavlink stream -d /dev/ttyS6 -s ATTITUDE -r 2
+mavlink stream -d /dev/ttyS6 -s VFR_HUD -r 1
+mavlink stream -d /dev/ttyS6 -s SYS_STATUS -r 1
+mavlink stream -d /dev/ttyS6 -s BATTERY_STATUS -r 0.5
+mavlink stream -d /dev/ttyS6 -s EXTENDED_SYS_STATE -r 1
+mavlink stream -d /dev/ttyS6 -s CURRENT_MODE -r 0.5
+mavlink stream -d /dev/ttyS6 -s HOME_POSITION -r 0.2
+mavlink stream -d /dev/ttyS6 -s ESTIMATOR_STATUS -r 0.2
+mavlink stream -d /dev/ttyS6 -s SYSTEM_TIME -r 1
