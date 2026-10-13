@@ -50,6 +50,13 @@ publications:
     type: px4_msgs::msg::TimesyncStatus
     rate_limit: 10.
 
+  # PPS edge: `timestamp` (HRT at the edge) is rewritten into agent time by the
+  # client like every other stamp; `rtc_timestamp` (UTC second of the edge)
+  # passes through. Together they measure the timesync bias live on the
+  # companion (cuas: px4_ros2_obc timing_monitor / DdsBiasEstimator).
+  - topic: /fmu/out/pps_capture
+    type: px4_msgs::msg::PpsCapture
+
   - topic: /fmu/out/transponder_report
     type: px4_msgs::msg::TransponderReport
  
