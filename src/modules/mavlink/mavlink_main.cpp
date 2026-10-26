@@ -694,13 +694,12 @@ Mavlink::get_free_tx_buf()
 
 #if defined(MAVLINK_UDP)
 
-	// if we are using network sockets, return max length of one packet
+	// Network sockets have no OS buffer to query; return the number of bytes one
+	// send tick may queue. MavlinkFTP::send() runs every 10 ms (receiver loop) and
+	// fills this budget with 239-byte burst chunks, so 1500 caps a UDP log
+	// download at ~119 kB/s; ten packets give the SD-read-bound rate.
 	if (get_protocol() == Protocol::UDP) {
-# if defined(__PX4_POSIX)
 		return  1500 * 10; // Speed up FTP transfers
-# else
-		return  1500;
-# endif /* defined(__PX4_POSIX) */
 
 	} else
 #endif // MAVLINK_UDP
