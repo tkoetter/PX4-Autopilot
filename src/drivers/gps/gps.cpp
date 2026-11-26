@@ -220,7 +220,10 @@ private:
 	px4::atomic<int> _scheduled_reset{(int)GPSRestartType::None};
 
 	// u-blox rover with a moving base: the heading of an epoch (NAV-RELPOSNED) arrives after its position
-	// (NAV-PVT), 5 to 115 ms later. The position is held until then so that both leave in one message.
+	// (NAV-PVT), 5 to 115 ms later. The position is held until then so that both leave in one message,
+	// but never longer than HEADING_WAIT_MAX: a position does not depend on the heading.
+	// EKF2_DELAY_MAX must cover EKF2_GPS_DELAY + HEADING_WAIT_MAX + two filter steps.
+	static constexpr hrt_abstime	HEADING_WAIT_MAX{130_ms};
 	bool				_rover_with_moving_base{false};		///< this instance receives NAV-RELPOSNED
 	bool				_heading_follows_position{false};	///< the last position got its NAV-RELPOSNED
 	bool				_position_waits_for_heading{false};	///< a complete position is held back
@@ -241,6 +244,16 @@ private:
 	 * NAV-RELPOSNED was received: the heading in the gps struct belongs to the position in it
 	 */
 	void 				headingReceived();
+
+	/**
+	 * Publish a held position without heading once it has waited HEADING_WAIT_MAX
+	 */
+	void 				publishOverduePosition();
+
+	/**
+	 * Shorten a read timeout (ms) so that a held position is looked at when its wait ends
+	 */
+	int 				limitToHeadingWait(int timeout) const;
 
 	/**
 	 * Publish the satellite info
@@ -414,7 +427,10 @@ int GPS::callback(GPSCallbackType type, void *data1, int data2, void *user)
 	case GPSCallbackType::readDeviceData: {
 			int timeout;
 			memcpy(&timeout, data1, sizeof(timeout));
-			int num_read = gps->pollOrRead((uint8_t *)data1, data2, timeout);
+			int num_read = gps->pollOrRead((uint8_t *)data1, data2, gps->limitToHeadingWait(timeout));
+
+			// before the bytes just read are parsed: they may hold the next epoch
+			gps->publishOverduePosition();
 
 			if (num_read > 0) {
 				gps->dumpGpsData((uint8_t *)data1, (size_t)num_read, gps_dump_comm_mode_t::Full, false);
@@ -1271,20 +1287,13 @@ GPS::positionReceived()
 		return;
 	}
 
-	if (_position_waits_for_heading) {
-		// The position before this one never got its NAV-RELPOSNED and is lost. Stop waiting until
-		// NAV-RELPOSNED is seen again, so that a receiver without it costs one position only.
-		_heading_follows_position = false;
-		_position_waits_for_heading = false;
-	}
-
 	const bool heading_received = (_heading_position_time == _sensor_gps.timestamp);
 
-	if (heading_received || !_heading_follows_position) {
-		publish();
+	// Wait only while the receiver sends NAV-RELPOSNED: without it a position leaves at once
+	_position_waits_for_heading = !heading_received && _heading_follows_position;
 
-	} else {
-		_position_waits_for_heading = true;
+	if (!_position_waits_for_heading) {
+		publish();
 	}
 }
 
@@ -1306,6 +1315,29 @@ GPS::headingReceived()
 		// Its position has left without it: a heading is never attached to a later epoch
 		_sensor_gps.heading = NAN;
 	}
+}
+
+void
+GPS::publishOverduePosition()
+{
+	if (_position_waits_for_heading && hrt_elapsed_time(&_sensor_gps.timestamp) >= HEADING_WAIT_MAX) {
+		// Leaves without heading. Do not wait again until NAV-RELPOSNED is seen.
+		_position_waits_for_heading = false;
+		_heading_follows_position = false;
+		publish();
+	}
+}
+
+int
+GPS::limitToHeadingWait(int timeout) const
+{
+	if (_position_waits_for_heading) {
+		const hrt_abstime waited = hrt_elapsed_time(&_sensor_gps.timestamp);
+		const int remaining_ms = (waited < HEADING_WAIT_MAX) ? (int)((HEADING_WAIT_MAX - waited) / 1000) + 1 : 1;
+		return math::min(timeout, remaining_ms);
+	}
+
+	return timeout;
 }
 
 void
