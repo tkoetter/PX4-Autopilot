@@ -219,10 +219,28 @@ private:
 
 	px4::atomic<int> _scheduled_reset{(int)GPSRestartType::None};
 
+	// u-blox rover with a moving base: the heading of an epoch (NAV-RELPOSNED) arrives after its position
+	// (NAV-PVT), 5 to 115 ms later. The position is held until then so that both leave in one message.
+	bool				_rover_with_moving_base{false};		///< this instance receives NAV-RELPOSNED
+	bool				_heading_follows_position{false};	///< the last position got its NAV-RELPOSNED
+	bool				_position_waits_for_heading{false};	///< a complete position is held back
+	hrt_abstime			_published_position_time{0};		///< _sensor_gps.timestamp of the last publication
+	hrt_abstime			_heading_position_time{0};		///< _sensor_gps.timestamp when NAV-RELPOSNED arrived
+
 	/**
 	 * Publish the gps struct
 	 */
 	void 				publish();
+
+	/**
+	 * A complete position was received: publish it, or hold it for the heading of its epoch
+	 */
+	void 				positionReceived();
+
+	/**
+	 * NAV-RELPOSNED was received: the heading in the gps struct belongs to the position in it
+	 */
+	void 				headingReceived();
 
 	/**
 	 * Publish the satellite info
@@ -434,6 +452,7 @@ int GPS::callback(GPSCallbackType type, void *data1, int data2, void *user)
 	case GPSCallbackType::gotRelativePositionMessage:
 		if (data1 && data2 == sizeof(sensor_gnss_relative_s)) {
 			gps->publishRelativePosition(*static_cast<sensor_gnss_relative_s *>(data1));
+			gps->headingReceived();
 		}
 
 		break;
@@ -870,6 +889,8 @@ GPS::run()
 #endif /* __PX4_LINUX */
 		}
 
+		_rover_with_moving_base = false;
+
 		switch (_mode) {
 		case gps_driver_mode_t::None:
 			_mode = gps_driver_mode_t::UBX;
@@ -878,6 +899,8 @@ GPS::run()
 		case gps_driver_mode_t::UBX:
 			_helper = new GPSDriverUBX(_interface, &GPS::callback, this, &_sensor_gps, _p_report_sat_info,
 						   gps_ubx_dynmodel, heading_offset, f9p_uart2_baudrate, ubx_mode);
+			_rover_with_moving_base = (ubx_mode == GPSDriverUBX::UBXMode::RoverWithMovingBase)
+						  || (ubx_mode == GPSDriverUBX::UBXMode::RoverWithMovingBaseUART1);
 			set_device_type(DRV_GPS_DEVTYPE_UBX);
 			break;
 #ifndef CONSTRAINED_FLASH
@@ -947,6 +970,10 @@ GPS::run()
 			memset(&_sensor_gps, 0, sizeof(_sensor_gps));
 			_sensor_gps.heading = NAN;
 			_sensor_gps.heading_offset = heading_offset;
+			_heading_follows_position = false;
+			_position_waits_for_heading = false;
+			_published_position_time = 0;
+			_heading_position_time = 0;
 
 			if (_mode == gps_driver_mode_t::UBX) {
 
@@ -1013,7 +1040,7 @@ GPS::run()
 			while ((helper_ret = _helper->receive(receive_timeout)) > 0 && !should_exit()) {
 
 				if (helper_ret & 1) {
-					publish();
+					positionReceived();
 
 					last_rate_count++;
 				}
@@ -1232,8 +1259,60 @@ GPS::reset_if_scheduled()
 }
 
 void
+GPS::positionReceived()
+{
+	if (!_rover_with_moving_base) {
+		publish();
+		return;
+	}
+
+	if (_sensor_gps.timestamp == _published_position_time) {
+		// NAV-RELPOSNED of this epoch has published it already
+		return;
+	}
+
+	if (_position_waits_for_heading) {
+		// The position before this one never got its NAV-RELPOSNED and is lost. Stop waiting until
+		// NAV-RELPOSNED is seen again, so that a receiver without it costs one position only.
+		_heading_follows_position = false;
+		_position_waits_for_heading = false;
+	}
+
+	const bool heading_received = (_heading_position_time == _sensor_gps.timestamp);
+
+	if (heading_received || !_heading_follows_position) {
+		publish();
+
+	} else {
+		_position_waits_for_heading = true;
+	}
+}
+
+void
+GPS::headingReceived()
+{
+	if (!_rover_with_moving_base) {
+		return;
+	}
+
+	_heading_follows_position = true;
+	_heading_position_time = _sensor_gps.timestamp;
+
+	if (_position_waits_for_heading) {
+		_position_waits_for_heading = false;
+		publish();
+
+	} else if (_sensor_gps.timestamp == _published_position_time) {
+		// Its position has left without it: a heading is never attached to a later epoch
+		_sensor_gps.heading = NAN;
+	}
+}
+
+void
 GPS::publish()
 {
+	_published_position_time = _sensor_gps.timestamp;
+
 	if (_instance == Instance::Main || _is_gps_main_advertised.load()) {
 		_sensor_gps.device_id = get_device_id();
 
