@@ -99,6 +99,9 @@ EKF2::EKF2(bool multi_mode, const px4::wq_config_t &config, bool replay_mode):
 	_param_ekf2_req_vdrift(_params->ekf2_req_vdrift),
 	_param_ekf2_req_fix(_params->ekf2_req_fix),
 	_param_ekf2_gsf_tas(_params->ekf2_gsf_tas),
+# if defined(CONFIG_EKF2_GNSS_YAW)
+	_param_ekf2_gyaw_noise(_params->gnss_heading_noise),
+# endif // CONFIG_EKF2_GNSS_YAW
 #endif // CONFIG_EKF2_GNSS
 #if defined(CONFIG_EKF2_BAROMETER)
 	_param_ekf2_baro_ctrl(_params->ekf2_baro_ctrl),

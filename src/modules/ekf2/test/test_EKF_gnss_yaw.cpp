@@ -340,3 +340,34 @@ TEST_F(EkfGpsHeadingTest, stopOnGround)
 	// THEN: the yaw variance increases
 	EXPECT_GT(_ekf->getYawVar(), yaw_variance_before);
 }
+
+TEST_F(EkfGpsHeadingTest, noiseFloor)
+{
+	// GIVEN: GPS yaw fusion with the default noise floor (0.1 rad)
+	// and a receiver that reports an accuracy of 0.01 rad
+	gnssSample gps = _sensor_simulator._gps.getData();
+	gps.yaw = _ekf_wrapper.getYawAngle();
+	gps.yaw_acc = 0.01f;
+	_sensor_simulator._gps.setData(gps);
+	_sensor_simulator.runSeconds(2);
+
+	// THEN: the heading is fused with the floor
+	EXPECT_TRUE(_ekf_wrapper.isIntendingGpsHeadingFusion());
+	EXPECT_FLOAT_EQ(_ekf->aid_src_gnss_yaw().observation_variance, 0.1f * 0.1f);
+
+	// WHEN: the floor is lowered and is still above the reported accuracy
+	_ekf->getParamHandle()->gnss_heading_noise = 0.0175f;
+	_sensor_simulator.runSeconds(2);
+
+	// THEN: the heading is fused with the new floor
+	EXPECT_FLOAT_EQ(_ekf->aid_src_gnss_yaw().observation_variance, 0.0175f * 0.0175f);
+
+	// WHEN: the receiver reports an accuracy worse than the floor
+	gps = _sensor_simulator._gps.getData();
+	gps.yaw_acc = 0.05f;
+	_sensor_simulator._gps.setData(gps);
+	_sensor_simulator.runSeconds(2);
+
+	// THEN: the reported accuracy is used
+	EXPECT_FLOAT_EQ(_ekf->aid_src_gnss_yaw().observation_variance, 0.05f * 0.05f);
+}

@@ -65,6 +65,18 @@ parameters:
       max: 360.0
       unit: deg
       decimal: 1
+    EKF2_GYAW_NOISE:
+      description:
+        short: Measurement noise floor for the GNSS heading (dual antenna)
+        long: The heading is fused with the larger of this value and the heading
+          accuracy the receiver reports. Also the yaw uncertainty after a reset
+          of the yaw to the GNSS heading.
+      type: float
+      default: 0.1
+      min: 0.005
+      max: 0.5
+      unit: rad
+      decimal: 4
     EKF2_GPS_V_GATE:
       description:
         short: Gate size for GNSS velocity fusion
