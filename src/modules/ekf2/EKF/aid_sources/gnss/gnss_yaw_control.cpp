@@ -136,7 +136,8 @@ void Ekf::updateGnssYaw(const gnssSample &gnss_sample)
 	const float measured_hdg = wrap_pi(gnss_sample.yaw + gnss_sample.yaw_offset);
 
 	const float yaw_acc = PX4_ISFINITE(gnss_sample.yaw_acc) ? gnss_sample.yaw_acc : 0.f;
-	const float R_YAW = sq(fmaxf(yaw_acc, _params.gnss_heading_noise));
+	// 5e-3 rad: never a zero variance, whatever the parameter and the receiver say
+	const float R_YAW = sq(fmaxf(fmaxf(yaw_acc, _params.gnss_heading_noise), 5.e-3f));
 
 	float heading_pred;
 	float heading_innov_var;

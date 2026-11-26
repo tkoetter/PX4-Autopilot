@@ -219,16 +219,19 @@ private:
 
 	px4::atomic<int> _scheduled_reset{(int)GPSRestartType::None};
 
-	// u-blox rover with a moving base: the heading of an epoch (NAV-RELPOSNED) arrives after its position
-	// (NAV-PVT), 5 to 115 ms later. The position is held until then so that both leave in one message,
-	// but never longer than HEADING_WAIT_MAX: a position does not depend on the heading.
+	// u-blox F9P rover with a moving base (5 Hz): the heading of an epoch (NAV-RELPOSNED) arrives
+	// after its position, 5 to 115 ms later. The position is held until then so that both leave
+	// in one message, but never longer than HEADING_WAIT_MAX: a position does not depend on the
+	// heading. The wait must stay shorter than an epoch: the held position lives in _sensor_gps.
 	// EKF2_DELAY_MAX must cover EKF2_GPS_DELAY + HEADING_WAIT_MAX + two filter steps.
 	static constexpr hrt_abstime	HEADING_WAIT_MAX{130_ms};
-	bool				_rover_with_moving_base{false};		///< this instance receives NAV-RELPOSNED
-	bool				_heading_follows_position{false};	///< the last position got its NAV-RELPOSNED
-	bool				_position_waits_for_heading{false};	///< a complete position is held back
-	hrt_abstime			_published_position_time{0};		///< _sensor_gps.timestamp of the last publication
-	hrt_abstime			_heading_position_time{0};		///< _sensor_gps.timestamp when NAV-RELPOSNED arrived
+	bool				_rover_with_moving_base{false};	///< this instance holds positions
+	bool				_heading_follows_position{false};	///< NAV-RELPOSNED is being received
+	bool				_position_waits_for_heading{false};	///< a complete position is held
+	hrt_abstime			_held_position_time{0};	///< timestamp of the held position
+	hrt_abstime			_published_position_time{0};	///< timestamp of the last one published
+	hrt_abstime			_heading_position_time{0};	///< timestamp when NAV-RELPOSNED came
+	unsigned			_headings_dropped{0};	///< headings without their position
 
 	/**
 	 * Publish the gps struct
@@ -249,6 +252,11 @@ private:
 	 * Publish a held position without heading once it has waited HEADING_WAIT_MAX
 	 */
 	void 				publishOverduePosition();
+
+	/**
+	 * Remove a heading that has no position of its own epoch to go with
+	 */
+	void 				dropHeading();
 
 	/**
 	 * Shorten a read timeout (ms) so that a held position is looked at when its wait ends
@@ -988,6 +996,7 @@ GPS::run()
 			_sensor_gps.heading_offset = heading_offset;
 			_heading_follows_position = false;
 			_position_waits_for_heading = false;
+			_held_position_time = 0;
 			_published_position_time = 0;
 			_heading_position_time = 0;
 
@@ -999,6 +1008,10 @@ GPS::run()
 				// populate specific ublox model
 				if (get_device_type() == DRV_GPS_DEVTYPE_UBX) {
 					GPSDriverUBX *driver_ubx = (GPSDriverUBX *)_helper;
+
+					// Faster receivers send the next epoch within the wait
+					_rover_with_moving_base &= (driver_ubx->board()
+								    == GPSDriverUBX::Board::u_blox9_F9P_L1L2);
 
 					switch (driver_ubx->board()) {
 					case GPSDriverUBX::Board::u_blox6:
@@ -1112,6 +1125,8 @@ GPS::run()
 					_healthy = true;
 				}
 			}
+
+			_position_waits_for_heading = false;
 
 			if (_healthy) {
 				_healthy = false;
@@ -1229,6 +1244,11 @@ GPS::print_status()
 		}
 
 		PX4_INFO("rate publication:\t\t%6.2f Hz", (double)_rate);
+
+		if (_rover_with_moving_base) {
+			PX4_INFO("headings dropped:\t\t%6u", _headings_dropped);
+		}
+
 		PX4_INFO("rate RTCM injection:\t%6.2f Hz", (double)_rtcm_injection_rate);
 
 		print_message(ORB_ID(sensor_gps), _sensor_gps);
@@ -1287,14 +1307,20 @@ GPS::positionReceived()
 		return;
 	}
 
-	const bool heading_received = (_heading_position_time == _sensor_gps.timestamp);
+	_position_waits_for_heading = false;
 
-	// Wait only while the receiver sends NAV-RELPOSNED: without it a position leaves at once
-	_position_waits_for_heading = !heading_received && _heading_follows_position;
+	if (_heading_position_time != _sensor_gps.timestamp) {
+		// No NAV-RELPOSNED since this position was stamped: a heading in the struct is an older one
+		dropHeading();
 
-	if (!_position_waits_for_heading) {
-		publish();
+		if (_heading_follows_position) {
+			_position_waits_for_heading = true;
+			_held_position_time = _sensor_gps.timestamp;
+			return;
+		}
 	}
+
+	publish();
 }
 
 void
@@ -1309,22 +1335,43 @@ GPS::headingReceived()
 
 	if (_position_waits_for_heading) {
 		_position_waits_for_heading = false;
-		publish();
+
+		if (_sensor_gps.timestamp == _held_position_time) {
+			publish();
+
+		} else {
+			// The next position is being received over the held one: whose heading this is, is unknown
+			dropHeading();
+		}
 
 	} else if (_sensor_gps.timestamp == _published_position_time) {
 		// Its position has left without it: a heading is never attached to a later epoch
-		_sensor_gps.heading = NAN;
+		dropHeading();
 	}
 }
 
 void
 GPS::publishOverduePosition()
 {
-	if (_position_waits_for_heading && hrt_elapsed_time(&_sensor_gps.timestamp) >= HEADING_WAIT_MAX) {
-		// Leaves without heading. Do not wait again until NAV-RELPOSNED is seen.
+	if (_position_waits_for_heading && hrt_elapsed_time(&_held_position_time) >= HEADING_WAIT_MAX) {
+		// Do not wait again until NAV-RELPOSNED is seen
 		_position_waits_for_heading = false;
 		_heading_follows_position = false;
-		publish();
+
+		if (_sensor_gps.timestamp == _held_position_time) {
+			publish();
+		}
+
+		// otherwise the next position is being received over it and is handled when complete
+	}
+}
+
+void
+GPS::dropHeading()
+{
+	if (PX4_ISFINITE(_sensor_gps.heading)) {
+		_headings_dropped++;
+		_sensor_gps.heading = NAN;
 	}
 }
 
@@ -1332,8 +1379,9 @@ int
 GPS::limitToHeadingWait(int timeout) const
 {
 	if (_position_waits_for_heading) {
-		const hrt_abstime waited = hrt_elapsed_time(&_sensor_gps.timestamp);
-		const int remaining_ms = (waited < HEADING_WAIT_MAX) ? (int)((HEADING_WAIT_MAX - waited) / 1000) + 1 : 1;
+		const hrt_abstime waited = hrt_elapsed_time(&_held_position_time);
+		const int remaining_ms = (waited < HEADING_WAIT_MAX)
+					 ? (int)((HEADING_WAIT_MAX - waited) / 1000) + 1 : 1;
 		return math::min(timeout, remaining_ms);
 	}
 
